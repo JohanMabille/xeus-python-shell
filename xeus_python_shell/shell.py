@@ -32,19 +32,29 @@ class LiteHistoryManager(HistoryManager):
         super(LiteHistoryManager, self).__init__(shell=shell, config=config, **traits)
 
 class XPythonLoopRunner:
-    """A dummy loop runner for usage in XPythonShell"""
+    """A loop runner for usage in XPythonShell"""
 
     def __init__(self):
         self.run_cell_lock = asyncio.Lock()
 
-    def __call__(self, coro, callback):
+    def __call__(self, coro, post_execute, callback):
 
-        async def wrapped(coro, callback,lock):
+        async def wrapped(coro,post_execute, callback,lock):
             async with lock:
                 result = await coro
-                callback()
-                return result
-        future =  asyncio.get_running_loop().create_task(wrapped(coro, callback, self.run_cell_lock))
+
+                # this seems to be needed when using smth which uses post_execute to update the UI
+                # ie ipmpl, matplotlib-inline etc.
+                await asyncio.sleep(0)
+                post_execute(result) # <- this will trigger ipythons events
+
+                # on of the sleeps is actual enough to prevent all known issues,
+                # but adding a second yield to the event loop is not harmfull in
+                # any may but might help with some edge cases, so we do it anyway
+                await asyncio.sleep(0)
+                callback() # <- this will send the execute request reply
+
+        future =  asyncio.get_running_loop().create_task(wrapped(coro, post_execute, callback, self.run_cell_lock))
             
 xeus_loop_runner = XPythonLoopRunner()
 
@@ -136,7 +146,12 @@ class XPythonShell(InteractiveShell):
             cell_id=cell_id
         )
 
-        xeus_loop_runner(future, done_callback)
+        def post_execute(result):
+            self.events.trigger("post_execute")
+            if not silent:
+                self.events.trigger("post_run_cell",result)
+
+        xeus_loop_runner(future, post_execute, done_callback)
 
 
 class XPythonShellApp(BaseIPythonApplication, InteractiveShellApp):
